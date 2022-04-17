@@ -1,30 +1,29 @@
+import os
+
+from s3prl.utility.download import _urls_to_filepaths
 from .expert import UpstreamExpert as _UpstreamExpert
 
 
-def customized_upstream(*args, **kwargs):
+def nansy_local(ckpt, *args, **kwargs):
     """
-    To enable your customized pretrained model, you only need to implement
-    upstream/example/expert.py and leave this file as is. This file is
-    used to register the UpstreamExpert in upstream/example/expert.py
-    The following is a brief introduction of the registration mechanism.
-
-    The s3prl/hub.py will collect all the entries registered in this file
-    (callable variables without the underscore prefix) as a centralized
-    upstream factory. One can pick up this upstream from the factory via
-
-    1.
-    from s3prl.hub import customized_upstream
-    model = customized_upstream(ckpt, model_config)
-
-    2.
-    model = torch.hub.load(
-        'your_s3prl_path',
-        'customized_upstream',
-        ckpt,
-        model_config,
-        source='local',
-    )
-
-    Our run_downstream.py and downstream/runner.py follows the first usage
+        The model from local ckpt
+            ckpt (str): PATH
+            feature_selection (str): 'c' (default) or 'z'
     """
-    return _UpstreamExpert(*args, **kwargs)
+    assert os.path.isfile(ckpt)
+    return _UpstreamExpert(ckpt, *args, **kwargs)
+
+def nansy_url(ckpt, refresh=False, *args, **kwargs):
+    """
+        The model from URL
+            ckpt (str): URL
+    """
+    return nansy_local(_urls_to_filepaths(ckpt, refresh=refresh, agent='gdown'), *args, **kwargs)
+
+def nansy(refresh=False, *args, **kwargs):
+    """
+        The apc standard model on 360hr
+            refresh (bool): whether to download ckpt/config again if existed
+    """
+    kwargs['ckpt'] = 'https://drive.google.com/uc?id=18cDJRmAxIbV3TzSTS70Vat6JVkuVH4Wq'
+    return nansy_url(refresh=refresh, *args, **kwargs)

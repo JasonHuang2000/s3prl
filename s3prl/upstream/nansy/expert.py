@@ -1,77 +1,89 @@
-from collections import OrderedDict
-from typing import List, Union, Dict
-
+import random
+import torch
 import torch.nn as nn
 from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
+from torchaudio import functional as AF
 
-HIDDEN_DIM = 8
+from typing import List, Dict, Union
+from collections import OrderedDict
 
+from .modules.analysis import Analysis
+from .utils.crop import CropUtil
+from .utils.mel import load_mel_from_audio
 
 class UpstreamExpert(nn.Module):
-    def __init__(self, ckpt: str = None, model_config: str = None, **kwargs):
-        """
-        Args:
-            ckpt:
-                The checkpoint path for loading your pretrained weights.
-                Can be assigned by the -k option in run_downstream.py
-
-            model_config:
-                The config path for constructing your model.
-                Might not needed if you also save that in your checkpoint file.
-                Can be assigned by the -g option in run_downstream.py
-        """
+    def __init__(self, ckpt: str = None, **kwargs):
         super().__init__()
-        self.name = "[Example UpstreamExpert]"
-
-        print(
-            f"{self.name} - You can use model_config to construct your customized model: {model_config}"
-        )
-        print(f"{self.name} - You can use ckpt to load your pretrained weights: {ckpt}")
-        print(
-            f"{self.name} - If you store the pretrained weights and model config in a single file, "
-            "you can just choose one argument (ckpt or model_config) to pass. It's up to you!"
-        )
-
-        # The model needs to be a nn.Module for finetuning, not required for representation extraction
-        self.model1 = nn.Linear(1, HIDDEN_DIM)
-        self.model2 = nn.Linear(HIDDEN_DIM, HIDDEN_DIM)
+        models = torch.load(ckpt)
+        self.model = Analysis()
+        component_state_dict = OrderedDict()
+        for key in models.keys():
+            if 'network.Analysis.' in key:
+                component_state_dict[key.replace('network.Analysis.', '')] = models[key]
+        self.model.load_state_dict(component_state_dict, strict=False)
+        self.crop_util = CropUtil()
 
     def get_downsample_rates(self, key: str) -> int:
-        """
-        Since we do not do any downsampling in this example upstream
-        All keys' corresponding representations have downsample rate of 1
-        """
         return 1
 
     def forward(self, wavs: List[Tensor]) -> Dict[str, Union[Tensor, List[Tensor]]]:
         """
-        When the returning Dict contains the List with more than one Tensor,
-        those Tensors should be in the same shape to train a weighted-sum on them.
+        Args:
+            wavs:
+                list of unpadded wavs [wav1, wav2, ...]
+                each wav is in torch.FloatTensor with sample rate 16000
+                and already put in the device assigned by command-line args
+        Return:
+            hidden states:
+                list of analysis results from the NANSY analysis module, including:
+                - Linguistic feature
+                - Speaker feature
+                - Energy feature
+                - Pitch feature
+                please refer to section 2.1 of https://arxiv.org/abs/2110.14513 for their structure and usage
         """
 
-        wavs = pad_sequence(wavs, batch_first=True).unsqueeze(-1)
-        # wavs: (batch_size, max_len, 1)
+        wavs_16k = wavs
+        wavs_22k = [AF.resample(wav, 16000, 22050) for wav in wavs]
+        mels_22k = [load_mel_from_audio(wav) for wav in wavs_22k]
 
-        hidden = self.model1(wavs)
-        # hidden: (batch_size, max_len, hidden_dim)
+        if self.training:
+            # train
+            cropped_wavs_16k = []
+            cropped_wavs_22k_yin = []
+            cropped_mels_22k = []
 
-        feature = self.model2(hidden)
-        # feature: (batch_size, max_len, hidden_dim)
+            for wav_16k, wav_22k, mel in zip(wavs_16k, wavs_22k, mels_22k):
+                mel_start = random.randint(0, mel.shape[-1] - self.crop_util.minimum_mel_length)
+                time_idxs = self.crop_util.get_time_idxs(mel_start)
+                cropped_wavs_16k.append(CropUtil.crop_tensor(wav_16k, time_idxs[3], time_idxs[5]))
+                cropped_wavs_22k_yin.append(CropUtil.crop_tensor(wav_22k, time_idxs[4], time_idxs[7]))
+                cropped_mels_22k.append(CropUtil.crop_tensor(mel, time_idxs[0], time_idxs[1],
+                                        padding_value=self.crop_util.mel_padding_value))
+                
+            batch = {
+                'wavs_16k': pad_sequence(cropped_wavs_16k, batch_first=True),
+                'wavs_22k_yin': pad_sequence(cropped_wavs_22k_yin, batch_first=True),
+                'mels_22k': pad_sequence(cropped_mels_22k, batch_first=True)
+            }
+            
+            with torch.no_grad():
+                linguistic_feat = self.model.linguistic(batch['wavs_16k'])
+                energy_feat = self.model.energy(batch['mels_22k'])
+                pitch_feat = self.model.pitch.yingram_batch(batch['wavs_22k_yin'])
 
-        # The "hidden_states" key will be used as default in many cases
-        # Others keys in this example are presented for SUPERB Challenge
+            speaker_feat = self.model.speaker(batch['wavs_16k'])
+            
+        else:
+            # eval
+            pass
+
         return {
-            "hidden_states": [hidden, feature],
-            "PR": [hidden, feature],
-            "ASR": [hidden, feature],
-            "QbE": [hidden, feature],
-            "SID": [hidden, feature],
-            "ASV": [hidden, feature],
-            "SD": [hidden, feature],
-            "ER": [hidden, feature],
-            "SF": [hidden, feature],
-            "SE": [hidden, feature],
-            "SS": [hidden, feature],
-            "secret": [hidden, feature],
+            "hidden_states": [
+                linguistic_feat,
+                speaker_feat,
+                energy_feat,
+                pitch_feat,
+            ],
         }
