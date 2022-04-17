@@ -100,7 +100,7 @@ class CropUtil:
         """
         mel_end = mel_start + self.mel_window
 
-        t_start = mel_start * self.conf.audio.hop_size / 22050.
+        t_start = mel_start * self.hop_size / 22050.
         w_start_22k = int(t_start * 22050)
         w_start_16k = int(t_start * 16000)
         w_end_22k = w_start_22k + self.audio_window_22k
